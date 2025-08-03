@@ -1,22 +1,33 @@
 import { Worker } from 'bullmq';
 import { redis } from './queues.js';
+import { PrismaClient } from '@prisma/client';
 import { GoogleGenAI } from '@google/genai';
 import dotenv from 'dotenv';
+
 dotenv.config();
 
+const ai = new GoogleGenAI({ apiKey: process.env.GOOGLE_API_KEY });
+const prisma = new PrismaClient();
 
-const ai = new GoogleGenAI({ apiKey:"AIzaSyDBCSU1lA6ofSsHuEQ1SpYdD5CWQ7kPViQ"});
-
-// ✅ Create LPQ Worker
-const lpqWorker = new Worker('lpq_generator', async (job) => {
+// 🔧 Helper to clean & parse Gemini response
+const parseAiJsonResponse = (text) => {
   try {
-    const { lessonTitle, difficulty, courseTitle, tags, moduleId, lessonId } = job.data;
+    const jsonString = text.replace(/^```json\n/, '').replace(/\n```$/, '');
+    return JSON.parse(jsonString);
+  } catch (err) {
+    console.error("❌ Failed to parse Gemini JSON:\n", text);
+    throw new Error("Malformed AI JSON.");
+  }
+};
 
-    console.log(`🔧 LPQ Worker processing:`, {
-      lessonTitle, difficulty, courseTitle, tags, moduleId, lessonId
-    });
+// 🧠 LPQ Worker
+const lpqWorker = new Worker('lpq_generator', async (job) => {
+  const { lessonTitle, difficulty, courseTitle, tags, moduleId, lessonId } = job.data;
 
-    // ✅ Smart prompt to Gemini
+  try {
+    console.log(`🔧 LPQ Worker processing lesson: ${lessonId}`);
+
+    // 🎯 Prompt for Gemini
     const prompt = `
 You are an expert lesson designer with world-class knowledge. Your task is to generate engaging content blocks for a lesson.
 
@@ -60,24 +71,94 @@ Return a JSON object with this structure:
 - Vary count slightly to make content feel natural
 - No headings or markdown, just valid JSON
 `;
+
+    // 🧠 AI Call
     const response = await ai.models.generateContent({
-      model:'gemini-2.0-flash',
-      contents:prompt,
-      responseMimeType:"text/plain"
-    })
+      model: 'gemini-2.0-flash',
+      contents: prompt,
+      responseMimeType: 'text/plain',
+    });
 
-    console.log('🧠 Gemini output:\n', response.text);
-    console.log(`✅ LPQ Worker finished for lesson: ${lessonId}`);
-    
-    // Optionally: save enriched content to DB here (using Prisma or similar)
-    // await prisma.lesson.update({ where: { id: lessonId }, data: { contentJson: response } });
+    const data = parseAiJsonResponse(response.text);
 
+    const lessonData = data.modules[0]?.lessons.find(
+      (l) => l.lesson_title.toLowerCase().trim() === lessonTitle.toLowerCase().trim()
+    );
+
+    if (!lessonData) {
+      throw new Error(`Lesson "${lessonTitle}" not found in AI response.`);
+    }
+
+    let order = 1;
+
+    for (const block of lessonData.content) {
+      if (block.type === 'mcq') {
+        const mcq = await prisma.mCQOption.create({
+          data: {
+            question: block.question,
+            options: block.options,
+            answer: block.answer,
+            explanation: block.explanation || '',
+          },
+        });
+
+        await prisma.contentBlock.create({
+          data: {
+            order: order++,
+            type: 'MCQ',
+            lessonId,
+            mcqId: mcq.id,
+          },
+        });
+      }
+
+      else if (block.type === 'paragraph') {
+        await prisma.contentBlock.create({
+          data: {
+            order: order++,
+            type: 'PARAGRAPH',
+            text: block.text,
+            lessonId,
+          },
+        });
+      }
+
+      else if (block.type === 'video') {
+        await prisma.videoSearch.create({
+          data: {
+            query: block.text,
+            lessonId,
+          },
+        });
+
+        await prisma.contentBlock.create({
+          data: {
+            order: order++,
+            type: 'VIDEO',
+            text: block.text,
+            lessonId,
+          },
+        });
+      }
+
+      // You can add more content types (e.g. CODE, HEADING) here as needed
+    }
+
+    // ✅ Mark lesson as enriched
+    await prisma.lesson.update({
+      where: { id: lessonId },
+      data: {
+        isEnriched: true,
+      },
+    });
+
+    console.log(`✅ Saved content for lesson: ${lessonId}`);
   } catch (err) {
-    console.error(`❌ LPQ Worker error:`, err);
+    console.error(`❌ LPQ Worker error for lesson ${job.data.lessonId}:`, err);
   }
 }, { connection: redis });
 
-// ✅ Graceful shutdown
+// 👋 Graceful shutdown
 process.on('SIGTERM', async () => {
   await lpqWorker.close();
   await redis.quit();

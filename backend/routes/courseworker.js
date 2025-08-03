@@ -104,14 +104,21 @@ Guidelines for content:
 
     for (const module of courseWithIds.modules) {
       for (const lesson of module.lessons) {
-        await lpqQueue.add('lpq_generator', {
-          moduleId: module.id,
-          lessonId: lesson.id,
-          lessonTitle: lesson.title,
-          difficulty: updatedCourse.difficulty,
-          courseTitle: updatedCourse.title,
-          tags: updatedCourse.tags
-        });
+        await lpqQueue.add(
+          'lpq_generator',
+          {
+            moduleId: module.id,
+            lessonId: lesson.id,
+            lessonTitle: lesson.title,
+            difficulty: updatedCourse.difficulty,
+            courseTitle: updatedCourse.title,
+            tags: updatedCourse.tags
+          },
+          {
+            jobId: `lesson:${lesson.id}`,
+            priority:5
+          }
+        );
         console.log(`📤 Enqueued lesson "${lesson.title}" (ID: ${lesson.id}) from module "${module.title}"`);
       }
     }
