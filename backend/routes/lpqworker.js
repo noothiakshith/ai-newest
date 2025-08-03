@@ -8,26 +8,26 @@ dotenv.config();
 
 const ai = new GoogleGenAI({ apiKey: process.env.GOOGLE_API_KEY });
 const prisma = new PrismaClient();
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// 🔧 Helper to clean & parse Gemini response
 const parseAiJsonResponse = (text) => {
   try {
     const jsonString = text.replace(/^```json\n/, '').replace(/\n```$/, '');
     return JSON.parse(jsonString);
   } catch (err) {
-    console.error("❌ Failed to parse Gemini JSON:\n", text);
+    console.error("Failed to parse Gemini JSON:\n", text);
     throw new Error("Malformed AI JSON.");
   }
 };
 
-// 🧠 LPQ Worker
 const lpqWorker = new Worker('lpq_generator', async (job) => {
   const { lessonTitle, difficulty, courseTitle, tags, moduleId, lessonId } = job.data;
 
   try {
-    console.log(`🔧 LPQ Worker processing lesson: ${lessonId}`);
+    console.log(`LPQ Worker processing lesson: ${lessonId}`);
 
-    // 🎯 Prompt for Gemini
+    await delay(3000);
+
     const prompt = `
 You are an expert lesson designer with world-class knowledge. Your task is to generate engaging content blocks for a lesson.
 
@@ -36,7 +36,7 @@ Difficulty: "${difficulty}"
 Course Title: "${courseTitle}"
 Tags: ${tags.join(', ')}
 
-🔧 Format:
+Format:
 Return a JSON object with this structure:
 
 {
@@ -64,20 +64,21 @@ Return a JSON object with this structure:
   ]
 }
 
-💡 Guidelines:
-- Include 1–2 *paragraph* blocks (for explanations)
-- Include 1–2 *video* blocks (YouTube search queries only)
-- Include 3–5 *mcq* blocks (varied difficulty)
-- Vary count slightly to make content feel natural
-- No headings or markdown, just valid JSON
+Guidelines:
+- Include 1–2 paragraph blocks
+- Include 1–2 video blocks (YouTube queries)
+- Include 3–5 mcq blocks
+- Vary block count slightly
+- Return valid JSON only
 `;
 
-    // 🧠 AI Call
     const response = await ai.models.generateContent({
       model: 'gemini-2.0-flash',
       contents: prompt,
       responseMimeType: 'text/plain',
     });
+
+    await delay(2000);
 
     const data = parseAiJsonResponse(response.text);
 
@@ -110,9 +111,7 @@ Return a JSON object with this structure:
             mcqId: mcq.id,
           },
         });
-      }
-
-      else if (block.type === 'paragraph') {
+      } else if (block.type === 'paragraph') {
         await prisma.contentBlock.create({
           data: {
             order: order++,
@@ -121,9 +120,7 @@ Return a JSON object with this structure:
             lessonId,
           },
         });
-      }
-
-      else if (block.type === 'video') {
+      } else if (block.type === 'video') {
         await prisma.videoSearch.create({
           data: {
             query: block.text,
@@ -140,11 +137,8 @@ Return a JSON object with this structure:
           },
         });
       }
-
-      // You can add more content types (e.g. CODE, HEADING) here as needed
     }
 
-    // ✅ Mark lesson as enriched
     await prisma.lesson.update({
       where: { id: lessonId },
       data: {
@@ -152,13 +146,12 @@ Return a JSON object with this structure:
       },
     });
 
-    console.log(`✅ Saved content for lesson: ${lessonId}`);
+    console.log(`Saved content for lesson: ${lessonId}`);
   } catch (err) {
-    console.error(`❌ LPQ Worker error for lesson ${job.data.lessonId}:`, err);
+    console.error(`LPQ Worker error for lesson ${job.data.lessonId}:`, err);
   }
 }, { connection: redis });
 
-// 👋 Graceful shutdown
 process.on('SIGTERM', async () => {
   await lpqWorker.close();
   await redis.quit();
