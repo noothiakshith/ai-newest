@@ -12,7 +12,7 @@ export const redis = new Redis({
 
 export const courseQueue = new Queue('course_generator', {
   connection: redis,
-  
+
   defaultJobOptions: {
     attempts: 3,
     backoff: {
@@ -24,6 +24,7 @@ export const courseQueue = new Queue('course_generator', {
 
 export const lpqQueue = new Queue('lpq_generator', {
   connection: redis,
+  priority:5,
   defaultJobOptions: {
     attempts: 3,
     backoff: {
@@ -32,3 +33,15 @@ export const lpqQueue = new Queue('lpq_generator', {
     },
   },
 });
+
+export const hpqQueue = new Queue('hpq_generator',{
+  connection:redis,
+  defaultJobOptions:{
+    attempts:3,
+    priority:1,
+    backoff:{
+      type:"exponential",
+      delay:6000
+    }
+  }
+})

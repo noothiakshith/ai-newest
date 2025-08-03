@@ -3,13 +3,11 @@ import { PrismaClient } from '@prisma/client';
 import { courseQueue, lpqQueue, redis } from './queues.js';
 import { GoogleGenAI } from "@google/genai";
 
-// Initialize Google Generative AI with API key from environment
 const ai = new GoogleGenAI(process.env.GOOGLE_API_KEY || '');
 const prisma = new PrismaClient();
 
 const parseAiJsonResponse = (text) => {
   try {
-    // AI might still wrap its response in markdown, so we strip it.
     const jsonString = text.replace(/^```json\n/, '').replace(/\n```$/, '');
     return JSON.parse(jsonString);
   } catch (error) {
@@ -63,45 +61,60 @@ Guidelines for content:
 - The lesson titles within each module should represent a clear progression of learning.
 - The overall curriculum must be appropriate for the specified "${difficulty}" level. For a BEGINNER, start with fundamentals. For ADVANCED, assume prior knowledge and focus on complex topics.
 `;
+
     const response = await ai.models.generateContent({
-      model:"gemini-2.0-flash",
-      contents:prompt,
-      responseMimeType:"text/plain"
+      model: "gemini-2.0-flash",
+      contents: prompt,
+      responseMimeType: "text/plain"
     });
+
     const ciricullam = parseAiJsonResponse(response.text);
-    console.log(JSON.stringify(ciricullam, null, 2));
 
-
- // Store everything in the DB
-const updatedCourse = await prisma.course.update({
-  where: { id: courseId },
-  data: {
-    title: ciricullam.title,
-    description: ciricullam.description,
-    tags: ciricullam.tags,
-    difficulty: difficulty.toUpperCase(),
-    durationDays: duration,
-    modules: {
-      create: ciricullam.modules.map((mod) => ({
-        title: mod.title,
-        lessons: {
-          create: mod.lessons.map((lesson) => ({
-            title: lesson.title,
+    const updatedCourse = await prisma.course.update({
+      where: { id: courseId },
+      data: {
+        title: ciricullam.title,
+        description: ciricullam.description,
+        tags: ciricullam.tags,
+        difficulty: difficulty.toUpperCase(),
+        durationDays: duration,
+        modules: {
+          create: ciricullam.modules.map((mod) => ({
+            title: mod.title,
+            lessons: {
+              create: mod.lessons.map((lesson) => ({
+                title: lesson.title,
+              })),
+            },
           })),
         },
-      })),
-    },
-  },
-});
-
-console.log("✅ Course, modules, and lessons stored in DB:", updatedCourse.id);
-
-    console.log("Added to lpq (note: updatedCourse is undefined due to commented code)");
-    await lpqQueue.add('lpq_task', {
-      title: 'akshith', // Hardcoded fallback
-      description: 'updated by Akshith worker',
-      difficulty: 'INTERMEDIATE',
+      },
     });
+
+    const courseWithIds = await prisma.course.findUnique({
+      where: { id: updatedCourse.id },
+      include: {
+        modules: {
+          include: {
+            lessons: true
+          }
+        }
+      }
+    });
+
+    for (const module of courseWithIds.modules) {
+      for (const lesson of module.lessons) {
+        await lpqQueue.add('lpq_generator', {
+          moduleId: module.id,
+          lessonId: lesson.id,
+          lessonTitle: lesson.title,
+          difficulty: updatedCourse.difficulty,
+          courseTitle: updatedCourse.title,
+          tags: updatedCourse.tags
+        });
+        console.log(`📤 Enqueued lesson "${lesson.title}" (ID: ${lesson.id}) from module "${module.title}"`);
+      }
+    }
 
     console.log(`✅ Updated course ${courseId}`);
   } catch (err) {
